@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PYTHONPATH: ${{ github.workspace }}
-            AWS_REGION: us-east-1
+              AWS_REGION: us-east-1
             AWS_DEFAULT_REGION: us-east-1
     steps:
       - uses: actions/checkout@v3
