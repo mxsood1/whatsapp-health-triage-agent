@@ -1,0 +1,24 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*.sqlite3
+venv/
+.env
+.env.*
+
+# Packaging
+*.egg-info/
+dist/
+build/
+
+# AWS SAM build artifacts
+.aws-sam/
+
+# VS Code settings
+.vscode/
+
+# Jupyter notebooks
+*.ipynb
+
+# Mac OS
+.DS_Store
