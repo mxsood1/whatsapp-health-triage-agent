@@ -1,0 +1,82 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  WhatsApp Healthcare Triage Agent serverless application. Provides an API
+  endpoint for Twilio WhatsApp webhooks, processes messages via a Lambda
+  function, stores state in DynamoDB, logs transcripts to S3 and alerts
+  healthcare staff via SNS.
+
+Globals:
+  Function:
+    Timeout: 30
+    Runtime: python3.11
+    MemorySize: 256
+    Environment:
+      Variables:
+        LLM_PROVIDER: !Ref LLMProvider
+        DYNAMODB_TABLE: !Ref TriageTable
+        S3_BUCKET: !Ref TranscriptBucket
+        SNS_TOPIC_ARN: !GetAtt AlertTopic.Arn
+        AWS_REGION: !Ref AWS::Region
+
+Parameters:
+  LLMProvider:
+    Type: String
+    Default: openai
+    AllowedValues:
+      - openai
+      - bedrock
+    Description: The LLM provider to use for triage classification.
+
+Resources:
+  ## DynamoDB table for conversation state
+  TriageTable:
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      TableName: whatsapp-triage-table
+      PrimaryKey:
+        Name: user_id
+        Type: String
+      BillingMode: PAY_PER_REQUEST
+
+  ## S3 bucket to store conversation transcripts
+  TranscriptBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: whatsapp-triage-transcripts
+      VersioningConfiguration:
+        Status: Enabled
+
+  ## SNS topic for high urgency alerts
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: whatsapp-triage-alerts
+
+  ## Lambda function to process WhatsApp webhook events
+  TriageFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: whatsapp-triage-function
+      CodeUri: src/
+      Handler: lambda_function.lambda_handler
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TriageTable
+        - S3WritePolicy:
+            BucketName: !Ref TranscriptBucket
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt AlertTopic.TopicName
+      Events:
+        TwilioWebhook:
+          Type: HttpApi
+          Properties:
+            Path: /webhook
+            Method: POST
+
+  ## Output API endpoint URL
+Outputs:
+  ApiUrl:
+    Description: The URL of the HTTP API endpoint
+    Value: !Sub 'https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com/webhook'
