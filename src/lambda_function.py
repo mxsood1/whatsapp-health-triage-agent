@@ -1,5 +1,6 @@
 """AWS Lambda handler for the WhatsApp Healthcare Triage Agent.
 
+
 This module contains the entry point used by AWS Lambda. It integrates
 Twilio webhook requests with the underlying triage logic defined in
 `utils.py`. The handler expects requests from API Gateway (HTTP API)
@@ -13,6 +14,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+
+import sys
+
 from typing import Any, Dict, List
 
 import boto3
@@ -84,7 +88,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     params: Dict[str, List[str]] = parse_qs(body)
 
     # Validate signature
-        verify_fn = globals().get("verify_twilio_signature", verify_twilio_signature)
+     verify_fn = getattr(sys.modules[__name__], "verify_twilio_signature", verify_twilio_signature)
+
     if not verify_fn(signature, full_url, params, twilio_auth_token or ''):
         logger.warning("Invalid Twilio signature")
         return {
