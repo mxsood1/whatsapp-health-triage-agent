@@ -84,7 +84,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     params: Dict[str, List[str]] = parse_qs(body)
 
     # Validate signature
-    if not verify_twilio_signature(signature, full_url, params, twilio_auth_token or ''):
+        verify_fn = globals().get("verify_twilio_signature", verify_twilio_signature)
+    if not verify_fn(signature, full_url, params, twilio_auth_token or ''):
         logger.warning("Invalid Twilio signature")
         return {
             'statusCode': 403,
