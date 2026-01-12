@@ -8,16 +8,15 @@ scheduling follow‑up or immediate escalation).
 
 ## Architecture
 
-```mermaid
-graph LR
-    A[WhatsApp (Twilio)] -->|Webhook| B((API Gateway))
-    B --> C{Lambda Handler}
-    C -->|Persist state| D[DynamoDB Table]
-    C -->|Log transcript| E[S3 Bucket]
-    C -->|Classify| F[LLM (OpenAI/Bedrock)]
-    C -->|Metrics| G[CloudWatch]
-    C -->|Notify high urgency| H[SNS Topic]
-```
+``Twilio WhatsApp** receives user messages and forwards them to an **AWS API Gateway** endpoint.
+
+- **API Gateway** is the public entry point, invoking the **AWS Lambda** handler.
+- The **Lambda** function validates the Twilio signature, loads or updates conversation state in **DynamoDB**, calls the configured LLM provider (OpenAI or AWS Bedrock) to classify urgency and intent, and decides how to respond.
+- **DynamoDB** stores user phone numbers, last message, triage level, and conversation history.
+- **Amazon S3** holds conversation transcripts for auditing and analysis.
+- The language model is accessed via **OpenAI** by default; you can swap to **AWS Bedrock** via environment variables.
+- **Amazon SNS** sends notifications to healthcare staff for high‑urgency cases.
+- **Amazon CloudWatch** captures logs and metrics for monitoring and troubleshooting.
 
 The WhatsApp channel is provided by **Twilio**. Incoming messages are sent to
 an Amazon API Gateway HTTP API backed by an AWS Lambda function written in
