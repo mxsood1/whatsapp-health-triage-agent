@@ -1,6 +1,5 @@
 """AWS Lambda handler for the WhatsApp Healthcare Triage Agent.
 
-
 This module contains the entry point used by AWS Lambda. It integrates
 Twilio webhook requests with the underlying triage logic defined in
 `utils.py`. The handler expects requests from API Gateway (HTTP API)
@@ -14,14 +13,13 @@ from __future__ import annotations
 import json
 import logging
 import os
-
 import sys
-
 from typing import Any, Dict, List
-
-import boto3
 from urllib.parse import parse_qs
 
+import boto3
+
+# Import only needed functions from utils; we don't import verify_twilio_signature
 from src.utils import (
     load_conversation,
     store_conversation,
@@ -32,10 +30,8 @@ from src.utils import (
 )
 import src.utils as utils
 
-)
-
-
-loger = logging.getLogger()
+# Set up logger
+logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # Initialize AWS clients outside of handler for reuse between invocations
@@ -78,8 +74,6 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     signature = headers.get('x-twilio-signature', '')
 
     # Construct the full URL used by Twilio to compute the signature.
-    # event['requestContext']['domainName'] looks like abcd1234.execute-api.region.amazonaws.com
-    # event['requestContext']['http']['path'] contains the resource path (e.g. /webhook).
     request_context = event.get('requestContext', {})
     domain = request_context.get('domainName', '')
     path = request_context.get('http', {}).get('path', '')
@@ -88,9 +82,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     # Parse the body as form data (Twilio posts application/x-www-form-urlencoded)
     params: Dict[str, List[str]] = parse_qs(body)
-  
-      # Validate signature
-verify_fn = getattr(sys.modules[__name__], "verify_twilio_signature", verify_twilio_signature)
+
+    # Validate signature using dynamic lookup so test patches override the function
+    verify_fn = globals().get("verify_twilio_signature", utils.verify_twilio_signature)
     if not verify_fn(signature, full_url, params, twilio_auth_token or ''):
         logger.warning("Invalid Twilio signature")
         return {
