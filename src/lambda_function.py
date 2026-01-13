@@ -23,7 +23,6 @@ import boto3
 from urllib.parse import parse_qs
 
 from src.utils import (
-    verify_twilio_signature,
     load_conversation,
     store_conversation,
     upload_transcript,
@@ -31,9 +30,12 @@ from src.utils import (
     build_response_and_state,
     generate_twiml_response,
 )
+import src.utils as utils
+
+)
 
 
-logger = logging.getLogger()
+loger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # Initialize AWS clients outside of handler for reuse between invocations
@@ -86,10 +88,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     # Parse the body as form data (Twilio posts application/x-www-form-urlencoded)
     params: Dict[str, List[str]] = parse_qs(body)
-
-    # Validate signature
-    verify_fn = getattr(sys.modules[__name__], "verify_twilio_signature", verify_twilio_signature)
-
+  
+      # Validate signature
+verify_fn = getattr(sys.modules[__name__], "verify_twilio_signature", verify_twilio_signature)
     if not verify_fn(signature, full_url, params, twilio_auth_token or ''):
         logger.warning("Invalid Twilio signature")
         return {
