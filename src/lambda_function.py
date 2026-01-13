@@ -27,6 +27,8 @@ from src.utils import (
     classify_message,
     build_response_and_state,
     generate_twiml_response,
+
+
 )
 import src.utils as utils
 
@@ -108,6 +110,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     triage_result = classify_message(message, conversation.get('history', []), provider=llm_provider)
 
     # Build reply and update conversation state
+    
     reply_message = build_response_and_state(
         triage_result,
         conversation,
@@ -134,3 +137,5 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         },
         'body': twiml,
     }
+
+verify_twilio_signature = utils.verify_twilio_signature
