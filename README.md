@@ -1,152 +1,236 @@
 # WhatsApp Healthcare Triage Agent
 
-This repository contains a serverless **WhatsApp Healthcare Triage Agent** that
-collects patient symptoms via WhatsApp, classifies the urgency of the
-conversation using a large language model, stores conversation context in
-AWS and routes the conversation to the appropriate path (self‑care guidance,
-scheduling follow‑up or immediate escalation).
+> **AI-powered patient triage via WhatsApp — serverless, event-driven, and fully AWS-native.**
+
+[![CI](https://github.com/mxsood1/whatsapp-health-triage-agent/actions/workflows/python.yml/badge.svg)](https://github.com/mxsood1/whatsapp-health-triage-agent/actions/workflows/python.yml)
+![Python](https://img.shields.io/badge/python-3.11-blue)
+![AWS SAM](https://img.shields.io/badge/IaC-AWS%20SAM-orange)
+![License](https://img.shields.io/badge/license-MIT-green)
+
+---
+
+## What it does
+
+Patients send a WhatsApp message describing their symptoms. The agent uses **AWS Bedrock (Claude 3 Haiku)** to analyse the message, classify urgency as **LOW / MEDIUM / HIGH**, and reply instantly with appropriate guidance — all without a single server to manage.
+
+- **LOW** → Self-care tips and advice to monitor symptoms
+- **MEDIUM** → Prompts the patient to book an appointment
+- **HIGH** → Emergency instructions + immediate SNS alert to healthcare staff
+
+---
 
 ## Architecture
 
-``Twilio WhatsApp** receives user messages and forwards them to an **AWS API Gateway** endpoint.
-
-- **API Gateway** is the public entry point, invoking the **AWS Lambda** handler.
-- The **Lambda** function validates the Twilio signature, loads or updates conversation state in **DynamoDB**, calls the configured LLM provider (OpenAI or AWS Bedrock) to classify urgency and intent, and decides how to respond.
-- **DynamoDB** stores user phone numbers, last message, triage level, and conversation history.
-- **Amazon S3** holds conversation transcripts for auditing and analysis.
-- The language model is accessed via **OpenAI** by default; you can swap to **AWS Bedrock** via environment variables.
-- **Amazon SNS** sends notifications to healthcare staff for high‑urgency cases.
-- **Amazon CloudWatch** captures logs and metrics for monitoring and troubleshooting.
-
-The WhatsApp channel is provided by **Twilio**. Incoming messages are sent to
-an Amazon API Gateway HTTP API backed by an AWS Lambda function written in
-Python. The handler performs the following steps:
-
-1. **Validate the request** – Checks the Twilio signature to ensure the
-   request originates from Twilio.
-2. **Load conversation state** – Reads the patient’s conversation history and
-   metadata from a DynamoDB table.
-3. **Classify the message** – Sends the latest message and conversation
-   context to an LLM (OpenAI or AWS Bedrock) to extract symptoms, duration,
-   red‑flags and classify urgency (`LOW`, `MEDIUM`, `HIGH`).
-4. **Route the conversation** – Depending on the urgency level, responds
-   appropriately and, for high urgency, triggers a notification via
-   Amazon SNS. Medium urgency conversations collect scheduling details while
-   low urgency conversations provide safe self‑care guidance.
-5. **Store the state** – Writes the updated conversation back to DynamoDB and
-   uploads a transcript to S3. All operations emit logs and metrics to
-   CloudWatch.
-
-The infrastructure is defined using **AWS Serverless Application Model (SAM)**.
-
-## Features
-
-* **WhatsApp Webhook:** An API Gateway endpoint that Twilio can POST to.
-* **Twilio Signature Validation:** Ensures all requests are genuine.
-* **Conversation Persistence:** Stores conversation history and metadata
-  (phone number, last intent, triage level, timestamps) in DynamoDB.
-* **LLM‑powered Triage:** Uses OpenAI’s API by default (easily swapped
-  for AWS Bedrock) to extract relevant medical information and classify
-  urgency.
-* **Routing Logic:** Responds differently based on the urgency:
-  - **HIGH:** Instructs the patient to seek emergency care immediately and
-    sends a notification email via SNS to healthcare staff.
-  - **MEDIUM:** Asks follow‑up questions for scheduling (name, preferred
-    appointment time) and stores them.
-  - **LOW:** Provides general, safe self‑care advice and reminds users to
-    contact a professional if symptoms worsen.
-* **Logging & Monitoring:** Writes conversation transcripts to S3,
-  publishes metrics and structured logs to CloudWatch and includes a
-  basic CloudWatch alarm example.
-* **Local development:** A simple Flask app simulates the webhook locally and
-  includes unit tests using `pytest` and `moto`.
-* **GitHub Actions:** A workflow runs tests on every push.
-
-## Getting Started
-
-### Prerequisites
-
-* [Python 3.11](https://www.python.org/downloads/) with `pip`.
-* An AWS account with permissions to deploy serverless resources.
-* Twilio account with a WhatsApp number and webhook configured.
-* OpenAI API key (or AWS Bedrock access) for LLM classification.
-
-### Setup
-
-1. **Clone the repository** and install dependencies:
-
-   ```bash
-   git clone https://github.com/your‑account/whatsapp-health-triage-agent
-   cd whatsapp-health-triage-agent
-   pip install -r requirements.txt
-   ```
-
-2. **Copy `.env.example` to `.env`** and fill in the required environment
-   variables. These are read by the Lambda function and local runner.
-
-3. **Configure Twilio webhook:** Point your Twilio WhatsApp number’s
-   webhook URL at the API Gateway endpoint you will deploy.
-
-4. **Deploy with SAM:**
-
-   ```bash
-   sam build
-   sam deploy --guided
-   ```
-
-   The guided deploy will prompt for parameters such as the stack name,
-   AWS region, S3 bucket for code uploads, and values for the DynamoDB
-   table, S3 bucket and SNS topic. Once deployed, note the API endpoint
-   and update your Twilio configuration accordingly.
-
-### Local Development
-
-The local runner in `local_runner.py` provides a Flask server to
-simulate the Twilio webhook locally. It reads from `.env` and uses
-mocked AWS resources.
-
-```bash
-export FLASK_APP=local_runner.py
-flask run --port 5000
+```
+WhatsApp User
+     │  (message)
+     ▼
+  Twilio
+     │  POST (signed webhook)
+     ▼
+API Gateway HTTP API
+     │
+     ▼
+AWS Lambda (Python 3.11 · Graviton2 · arm64)
+     │
+     ├─► DynamoDB          — conversation state + 90-day TTL
+     ├─► AWS Bedrock       — Claude 3 Haiku for triage classification
+     ├─► Amazon S3         — encrypted transcript archive
+     ├─► Amazon SNS        — HIGH-urgency staff alert
+     └─► CloudWatch        — structured logs + dashboard + alarm
+     │
+     ▼
+TwiML response → Twilio → WhatsApp reply
 ```
 
-You can send test POST requests to `http://localhost:5000/webhook` with
-form‑encoded data mimicking Twilio’s payload. See `tests/test_lambda_function.py`
-for examples.
+---
 
-### Testing
+## Tech Stack
 
-Tests are written with `pytest` and use `moto` to mock AWS services. To run
-the test suite locally:
+| Layer | Service | Detail |
+|---|---|---|
+| Messaging | Twilio WhatsApp | Webhook with HMAC-SHA1 signature validation |
+| API | Amazon API Gateway | HTTP API (serverless, no idle cost) |
+| Compute | AWS Lambda | Python 3.11, Graviton2 arm64, 256 MB |
+| AI / LLM | AWS Bedrock | Claude 3 Haiku (default) or OpenAI GPT-3.5 |
+| State | Amazon DynamoDB | On-demand capacity, encrypted at rest, 90-day TTL |
+| Archive | Amazon S3 | AES-256 encryption, public access blocked, 1-yr lifecycle |
+| Alerts | Amazon SNS | Email subscription for HIGH-urgency cases |
+| Monitoring | Amazon CloudWatch | Structured JSON logs, dashboard, error alarm |
+| IaC | AWS SAM | Single `sam deploy` command to provision everything |
+| CI/CD | GitHub Actions | Runs on every push with coverage reporting |
+
+---
+
+## Key Features
+
+- **Fully serverless** — zero servers to manage, scales to zero when idle
+- **AWS-native LLM** — Bedrock keeps data within your AWS account; no external API dependency
+- **Conversation memory** — DynamoDB persists full chat history; the LLM sees prior messages for better context
+- **Rate limiting** — 50 messages per user per day, enforced server-side
+- **Security hardened** — Twilio signature validation, S3 public access blocked, TLS-only bucket policy, DynamoDB encryption at rest, XML output escaped to prevent injection
+- **Data minimisation** — phone numbers masked in logs; conversation data auto-expires after 90 days via DynamoDB TTL; S3 objects expire after 1 year
+- **Operational visibility** — CloudWatch dashboard with Lambda metrics (invocations, errors, p50/p99 duration), DynamoDB capacity, and an error-rate alarm
+- **Keyword fallback** — if Bedrock is unavailable the system still triages using keyword matching so patients always get a response
+
+---
+
+## Prerequisites
+
+- AWS account (free tier works for low volume)
+- [AWS CLI](https://aws.amazon.com/cli/) configured (`aws configure`)
+- [AWS SAM CLI](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html)
+- [Twilio account](https://www.twilio.com/) with a WhatsApp-enabled number
+- Python 3.11+
+- Bedrock model access enabled for `anthropic.claude-3-haiku-20240307-v1:0` in your region
+
+> **Enabling Bedrock:** AWS Console → Amazon Bedrock → Model access → Request access for *Claude 3 Haiku*. Approval is usually instant.
+
+---
+
+## Deploy to AWS
 
 ```bash
+# 1. Clone the repository
+git clone https://github.com/mxsood1/whatsapp-health-triage-agent.git
+cd whatsapp-health-triage-agent
+
+# 2. Install dependencies
+pip install -r requirements.txt
+
+# 3. Build and deploy (follow the prompts)
+sam build
+sam deploy --guided
+```
+
+The guided deploy will ask for:
+
+| Parameter | Description |
+|---|---|
+| `LLMProvider` | `bedrock` (recommended) or `openai` |
+| `TwilioAuthToken` | From Twilio Console → Account → API keys |
+| `AlertEmailAddress` | (Optional) Email for HIGH-urgency alerts |
+| `OpenAIApiKey` | Only needed if `LLMProvider=openai` |
+
+After deploy, copy the **WebhookUrl** from the Outputs and paste it into your Twilio WhatsApp sandbox/number as the "A message comes in" webhook URL.
+
+---
+
+## Local Development
+
+```bash
+# Copy and fill in env vars
+cp .env.example .env
+
+# Run the Flask development server (port 5000)
+python local_runner.py
+
+# Test with curl (Twilio signature validation is skipped locally)
+curl -X POST http://localhost:5000/webhook \
+  -d "From=%2B15005550006&Body=I+have+chest+pain"
+```
+
+---
+
+## Running Tests
+
+```bash
+# All tests with coverage report
+pytest --cov=src --cov-report=term-missing -v
+
+# Quick run
 pytest -q
 ```
 
-### Environmental Variables
+Tests use `moto` to mock all AWS services — no real AWS account required.
 
-The application expects the following environment variables (see
-`.env.example` for details):
+---
 
-| Variable              | Description                                         |
-|-----------------------|-----------------------------------------------------|
-| `OPENAI_API_KEY`      | API key for OpenAI (if using OpenAI for LLM).       |
-| `LLM_PROVIDER`        | `openai` or `bedrock`. Default is `openai`.         |
-| `DYNAMODB_TABLE`      | Name of the DynamoDB table for state.              |
-| `S3_BUCKET`           | Name of the S3 bucket for storing transcripts.     |
-| `SNS_TOPIC_ARN`       | ARN of the SNS topic for high‑urgency alerts.       |
-| `TWILIO_AUTH_TOKEN`   | Your Twilio auth token used for signature validation.|
+## Environment Variables
 
-## Security Notes
+| Variable | Required | Description |
+|---|---|---|
+| `LLM_PROVIDER` | Yes | `bedrock` or `openai` |
+| `DYNAMODB_TABLE` | Yes | DynamoDB table name (set by SAM) |
+| `S3_BUCKET` | Yes | S3 bucket name (set by SAM) |
+| `SNS_TOPIC_ARN` | Yes | SNS topic ARN (set by SAM) |
+| `TWILIO_AUTH_TOKEN` | Yes | Webhook signature validation |
+| `OPENAI_API_KEY` | No | Only when `LLM_PROVIDER=openai` |
+| `AWS_REGION` | No | Defaults to Lambda execution region |
 
-* This application is **not** a diagnostic tool. It is designed
-  exclusively to triage messages and give high‑level guidance. Always
-  instruct users to seek professional medical advice.
-* All personally identifiable and medical information should be handled
-  with care. Only the minimum necessary data is stored and logs are
-  redacted where appropriate.
+---
+
+## Estimated AWS Cost
+
+For a small healthcare practice (~500 conversations/month):
+
+| Service | Estimate |
+|---|---|
+| Lambda (500 invocations × 2s avg) | ~$0.00 (free tier) |
+| API Gateway (500 requests) | ~$0.00 (free tier) |
+| DynamoDB (on-demand, ~500 writes) | ~$0.01 |
+| S3 (1 MB transcripts) | ~$0.00 |
+| Bedrock Claude 3 Haiku | ~$0.10–$0.50 |
+| SNS (a few alerts) | ~$0.00 |
+| **Total** | **< $1/month** |
+
+---
+
+## How Triage Classification Works
+
+1. The patient's latest message plus the last 10 conversation turns are sent to the LLM as context
+2. Claude 3 Haiku returns structured JSON: `{symptoms, duration, age, red_flags, urgency}`
+3. If the LLM call fails, a keyword-based fallback classifier handles the message
+4. Urgency is mapped to a response branch (LOW / MEDIUM / HIGH)
+
+**Example LLM output:**
+```json
+{
+  "symptoms": ["chest tightness", "shortness of breath"],
+  "duration": "30 minutes",
+  "age": "52",
+  "red_flags": ["chest tightness", "shortness of breath"],
+  "urgency": "HIGH"
+}
+```
+
+---
+
+## Security Considerations
+
+- **Twilio signature validation** on every request prevents spoofed webhooks
+- **Phone numbers are masked** in all logs (only last 4 digits retained)
+- **S3 bucket** blocks all public access and enforces TLS
+- **DynamoDB** uses AWS-managed encryption at rest
+- **TwiML output** is XML-escaped to prevent injection attacks
+- **Rate limiting** (50 messages/user/day) prevents cost abuse
+- **Bedrock** keeps patient data within your AWS account — no data sent to third parties when using the default provider
+- This system is **not a diagnostic tool** and must not replace professional medical advice
+
+---
+
+## Project Structure
+
+```
+whatsapp-health-triage-agent/
+├── src/
+│   ├── lambda_function.py   # Lambda handler — webhook validation & orchestration
+│   └── utils.py             # Core logic — triage, DynamoDB, S3, SNS, TwiML
+├── tests/
+│   ├── test_lambda_function.py   # Integration tests (7 scenarios)
+│   └── test_utils.py             # Unit tests (20+ cases)
+├── template.yaml            # AWS SAM — all infrastructure as code
+├── local_runner.py          # Flask dev server for local testing
+├── requirements.txt
+└── .env.example
+```
+
+---
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for
- details.
+MIT — see [LICENSE](LICENSE) for details.
+
+---
+
+> **Disclaimer:** This application is a triage tool only. It does not provide medical diagnoses, treatment recommendations, or clinical advice. Always direct patients to qualified healthcare professionals.

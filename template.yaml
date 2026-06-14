@@ -1,65 +1,160 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >-
-  WhatsApp Healthcare Triage Agent serverless application. Provides an API
-  endpoint for Twilio WhatsApp webhooks, processes messages via a Lambda
-  function, stores state in DynamoDB, logs transcripts to S3 and alerts
-  healthcare staff via SNS.
+  WhatsApp Healthcare Triage Agent — AI-powered patient triage via WhatsApp,
+  backed by AWS Bedrock (Claude 3 Haiku), DynamoDB, S3, SNS, and CloudWatch.
 
+# ---------------------------------------------------------------------------
+# Parameters — prompted once during `sam deploy --guided`
+# ---------------------------------------------------------------------------
+Parameters:
+  LLMProvider:
+    Type: String
+    Default: bedrock
+    AllowedValues: [openai, bedrock]
+    Description: >-
+      LLM provider for triage classification.
+      'bedrock' (recommended) uses Claude 3 Haiku with no external API key.
+      'openai' requires OpenAIApiKey to be set.
+
+  OpenAIApiKey:
+    Type: String
+    Default: ''
+    NoEcho: true
+    Description: OpenAI API key — only required when LLMProvider is 'openai'.
+
+  TwilioAuthToken:
+    Type: String
+    NoEcho: true
+    Description: Twilio Auth Token used to validate incoming webhook signatures.
+
+  AlertEmailAddress:
+    Type: String
+    Default: ''
+    Description: >-
+      (Optional) Email address to subscribe to the HIGH-urgency SNS alert topic.
+      Leave blank to skip email subscription.
+
+# ---------------------------------------------------------------------------
+# Conditions
+# ---------------------------------------------------------------------------
+Conditions:
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmailAddress, '']]
+
+# ---------------------------------------------------------------------------
+# Shared function defaults
+# ---------------------------------------------------------------------------
 Globals:
   Function:
     Timeout: 30
     Runtime: python3.11
     MemorySize: 256
+    Architectures: [arm64]   # Graviton2 — ~20% cheaper & faster cold starts
     Environment:
       Variables:
         LLM_PROVIDER: !Ref LLMProvider
         DYNAMODB_TABLE: !Ref TriageTable
         S3_BUCKET: !Ref TranscriptBucket
         SNS_TOPIC_ARN: !GetAtt AlertTopic.Arn
-        AWS_REGION: !Ref AWS::Region
+        TWILIO_AUTH_TOKEN: !Ref TwilioAuthToken
+        OPENAI_API_KEY: !Ref OpenAIApiKey
+        LOG_LEVEL: INFO
 
-Parameters:
-  LLMProvider:
-    Type: String
-    Default: openai
-    AllowedValues:
-      - openai
-      - bedrock
-    Description: The LLM provider to use for triage classification.
-
+# ---------------------------------------------------------------------------
+# Resources
+# ---------------------------------------------------------------------------
 Resources:
-  ## DynamoDB table for conversation state
-  TriageTable:
-    Type: AWS::Serverless::SimpleTable
-    Properties:
-      TableName: whatsapp-triage-table
-      PrimaryKey:
-        Name: user_id
-        Type: String
-      BillingMode: PAY_PER_REQUEST
 
-  ## S3 bucket to store conversation transcripts
+  # ── DynamoDB ─────────────────────────────────────────────────────────────
+  # Stores per-user conversation state.
+  # TTL auto-expires items after 90 days for data minimisation.
+  # PITR enabled for point-in-time recovery.
+  TriageTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-conversations"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  # ── S3 ───────────────────────────────────────────────────────────────────
+  # Conversation transcript archive.
+  # Encrypted at rest, public access blocked, lifecycle moves old objects to
+  # cheaper storage and expires them after 1 year.
   TranscriptBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: whatsapp-triage-transcripts
       VersioningConfiguration:
         Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ArchiveAndExpire
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 90
+                StorageClass: STANDARD_IA
+            ExpirationInDays: 365
 
-  ## SNS topic for high urgency alerts
+  TranscriptBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref TranscriptBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyNonSSL
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt TranscriptBucket.Arn
+              - !Sub "${TranscriptBucket.Arn}/*"
+            Condition:
+              Bool:
+                'aws:SecureTransport': false
+
+  # ── SNS ──────────────────────────────────────────────────────────────────
+  # HIGH-urgency alert topic. If an email address is provided, a subscription
+  # is created automatically (requires email confirmation after first deploy).
   AlertTopic:
     Type: AWS::SNS::Topic
     Properties:
-      TopicName: whatsapp-triage-alerts
+      TopicName: !Sub "${AWS::StackName}-alerts"
+      Subscriptions:
+        - !If
+          - HasAlertEmail
+          - Endpoint: !Ref AlertEmailAddress
+            Protocol: email
+          - !Ref AWS::NoValue
 
-  ## Lambda function to process WhatsApp webhook events
+  # ── Lambda ───────────────────────────────────────────────────────────────
   TriageFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: whatsapp-triage-function
+      FunctionName: !Sub "${AWS::StackName}-handler"
       CodeUri: src/
       Handler: lambda_function.lambda_handler
+      Description: Validates Twilio webhooks, classifies urgency via LLM, and replies via WhatsApp.
       Policies:
         - AWSLambdaBasicExecutionRole
         - DynamoDBCrudPolicy:
@@ -68,15 +163,130 @@ Resources:
             BucketName: !Ref TranscriptBucket
         - SNSPublishMessagePolicy:
             TopicName: !GetAtt AlertTopic.TopicName
+        # Bedrock: allow inference on Claude 3 Haiku only (least privilege)
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource:
+                - !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/anthropic.claude-3-haiku-20240307-v1:0"
       Events:
         TwilioWebhook:
           Type: HttpApi
           Properties:
             Path: /webhook
             Method: POST
+      Tags:
+        Project: whatsapp-health-triage
+        ManagedBy: SAM
 
-  ## Output API endpoint URL
+  # ── CloudWatch Alarm ─────────────────────────────────────────────────────
+  # Triggers an SNS alert when Lambda error count exceeds 5 in 5 minutes.
+  ErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-lambda-errors"
+      AlarmDescription: Lambda error rate exceeded threshold — investigate immediately.
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref TriageFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref AlertTopic
+      TreatMissingData: notBreaching
+
+  # ── CloudWatch Dashboard ─────────────────────────────────────────────────
+  TriageDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${AWS::StackName}-dashboard"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "Lambda — Invocations & Errors",
+                "metrics": [
+                  ["AWS/Lambda", "Invocations", "FunctionName", "${TriageFunction}", {"stat": "Sum", "color": "#1f77b4"}],
+                  ["AWS/Lambda", "Errors",      "FunctionName", "${TriageFunction}", {"stat": "Sum", "color": "#d62728"}]
+                ],
+                "period": 300,
+                "region": "${AWS::Region}",
+                "view": "timeSeries",
+                "stacked": false
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "Lambda — Duration (ms)",
+                "metrics": [
+                  ["AWS/Lambda", "Duration", "FunctionName", "${TriageFunction}", {"stat": "p50",  "label": "p50"}],
+                  ["AWS/Lambda", "Duration", "FunctionName", "${TriageFunction}", {"stat": "p99",  "label": "p99", "color": "#ff7f0e"}]
+                ],
+                "period": 300,
+                "region": "${AWS::Region}",
+                "view": "timeSeries"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 6, "width": 12, "height": 6,
+              "properties": {
+                "title": "DynamoDB — Consumed Capacity",
+                "metrics": [
+                  ["AWS/DynamoDB", "ConsumedReadCapacityUnits",  "TableName", "${TriageTable}", {"stat": "Sum"}],
+                  ["AWS/DynamoDB", "ConsumedWriteCapacityUnits", "TableName", "${TriageTable}", {"stat": "Sum"}]
+                ],
+                "period": 300,
+                "region": "${AWS::Region}",
+                "view": "timeSeries"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 6, "width": 12, "height": 6,
+              "properties": {
+                "title": "Lambda — Throttles & Concurrent Executions",
+                "metrics": [
+                  ["AWS/Lambda", "Throttles",             "FunctionName", "${TriageFunction}", {"stat": "Sum"}],
+                  ["AWS/Lambda", "ConcurrentExecutions",  "FunctionName", "${TriageFunction}", {"stat": "Maximum"}]
+                ],
+                "period": 300,
+                "region": "${AWS::Region}",
+                "view": "timeSeries"
+              }
+            }
+          ]
+        }
+
+# ---------------------------------------------------------------------------
+# Outputs
+# ---------------------------------------------------------------------------
 Outputs:
-  ApiUrl:
-    Description: The URL of the HTTP API endpoint
-    Value: !Sub 'https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com/webhook'
+  WebhookUrl:
+    Description: >-
+      Paste this URL into your Twilio WhatsApp Sandbox (or number) webhook
+      configuration under "A message comes in".
+    Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com/webhook"
+
+  DashboardUrl:
+    Description: CloudWatch operational dashboard.
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home#dashboards:name=${AWS::StackName}-dashboard"
+
+  AlertTopicArn:
+    Description: SNS Topic ARN for HIGH-urgency triage alerts.
+    Value: !GetAtt AlertTopic.Arn
+
+  TranscriptBucketName:
+    Description: S3 bucket where conversation transcripts are archived.
+    Value: !Ref TranscriptBucket

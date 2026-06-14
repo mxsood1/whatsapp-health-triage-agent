@@ -1,91 +1,104 @@
-"""Local webhook runner for development and testing.
-
-This Flask application mimics the API Gateway + Lambda integration used
-in production. It loads environment variables from a `.env` file (via
-python‑dotenv) and wires up the same triage logic used in
-`lambda_function.py`. You can post form‑encoded requests to
-`/webhook` to simulate Twilio webhook calls.
+"""Local development server — simulates API Gateway + Lambda locally.
 
 Run with:
+    pip install -r requirements.txt
+    cp .env.example .env   # fill in your values
+    python local_runner.py
 
-```bash
-pip install -r requirements.txt
-python local_runner.py
-```
+Then send test requests:
+    curl -X POST http://localhost:5000/webhook \\
+      -d "From=%2B15005550006&Body=I+have+a+headache"
 
-Then send a POST request to http://localhost:5000/webhook with
-parameters `From` and `Body` to see the XML reply.
+Twilio signature validation is skipped in local mode. AWS calls use
+the credentials configured in your environment (~/.aws/credentials or
+environment variables).
 """
 
 from __future__ import annotations
 
 import os
-from flask import Flask, request, Response
+
 import boto3
 from dotenv import load_dotenv
+from flask import Flask, Response, request
 
-from utils import (
-    verify_twilio_signature,
-    load_conversation,
-    store_conversation,
-    upload_transcript,
-    classify_message,
-    build_response_and_state,
-    generate_twiml_response,
-)
+# Support running from the project root (python local_runner.py)
+try:
+    from src.utils import (
+        build_response_and_state,
+        classify_message,
+        generate_twiml_response,
+        increment_message_count,
+        is_rate_limited,
+        load_conversation,
+        sanitize_input,
+        store_conversation,
+        upload_transcript,
+    )
+except ImportError:
+    from utils import (  # type: ignore
+        build_response_and_state,
+        classify_message,
+        generate_twiml_response,
+        increment_message_count,
+        is_rate_limited,
+        load_conversation,
+        sanitize_input,
+        store_conversation,
+        upload_transcript,
+    )
 
-# Load environment from .env if present
 load_dotenv()
 
 app = Flask(__name__)
 
-dynamodb = boto3.resource('dynamodb')
-s3_client = boto3.client('s3')
-sns_client = boto3.client('sns')
+table_name = os.getenv("DYNAMODB_TABLE")
+bucket_name = os.getenv("S3_BUCKET")
+topic_arn = os.getenv("SNS_TOPIC_ARN")
+llm_provider = os.getenv("LLM_PROVIDER", "bedrock")
 
-table_name = os.getenv('DYNAMODB_TABLE')
-bucket_name = os.getenv('S3_BUCKET')
-topic_arn = os.getenv('SNS_TOPIC_ARN')
-twilio_auth_token = os.getenv('TWILIO_AUTH_TOKEN', '')
-llm_provider = os.getenv('LLM_PROVIDER', 'openai')
-
+dynamodb = boto3.resource("dynamodb")
+s3_client = boto3.client("s3")
+sns_client = boto3.client("sns")
 table = dynamodb.Table(table_name) if table_name else None
 
 
-@app.route('/webhook', methods=['POST'])
+@app.route("/webhook", methods=["POST"])
 def webhook() -> Response:
-    # Flask provides request.url (full URL) and form (ImmutableMultiDict)
-    full_url = request.url
+    # Signature validation intentionally skipped for local development
     params = {k: [v] for k, v in request.form.items()}
-    signature = request.headers.get('X-Twilio-Signature', '')
+    user_id = params.get("From", [""])[0]
+    raw_message = params.get("Body", [""])[0].strip()
 
-    if not verify_twilio_signature(signature, full_url, params, twilio_auth_token):
-        return Response('Invalid signature', status=403)
+    if not user_id or not raw_message:
+        return Response("Missing From or Body", status=400)
 
-    user_id = params.get('From', [''])[0]
-    message = params.get('Body', [''])[0].strip()
-    if not user_id or not message:
-        return Response('Missing From or Body', status=400)
-
+    message = sanitize_input(raw_message)
     conversation = load_conversation(table, user_id) if table else {}
-    triage_result = classify_message(message, conversation.get('history', []), provider=llm_provider)
+
+    if is_rate_limited(conversation):
+        twiml = generate_twiml_response(
+            "You have sent too many messages today. Please try again tomorrow."
+        )
+        return Response(twiml, mimetype="application/xml")
+
+    increment_message_count(conversation)
+    triage_result = classify_message(message, conversation.get("history", []), provider=llm_provider)
     reply = build_response_and_state(
-        triage_result,
-        conversation,
-        message,
-        sns_client,
-        topic_arn,
-        user_id,
+        triage_result, conversation, message, sns_client, topic_arn or "", user_id
     )
+
     if table:
         store_conversation(table, conversation)
     if bucket_name:
-        transcript_lines = [f"{msg['timestamp']}: {msg['message']}" for msg in conversation.get('history', [])]
-        transcript = "\n".join(transcript_lines)
-        upload_transcript(s3_client, bucket_name, user_id, transcript)
-    twiml = generate_twiml_response(reply)
-    return Response(twiml, mimetype='application/xml')
+        lines = [
+            f"{msg['timestamp']} [{msg.get('role', 'patient')}]: {msg['message']}"
+            for msg in conversation.get("history", [])
+        ]
+        upload_transcript(s3_client, bucket_name, user_id, "\n".join(lines))
+
+    return Response(generate_twiml_response(reply), mimetype="application/xml")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     app.run(port=5000, debug=True)
